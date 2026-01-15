@@ -17,6 +17,7 @@ def validate_csv(file_content: bytes) -> ValidationResponse:
 
     errors: List[ValidationError] = []
 
+    # Check for missing columns
     missing_cols = [col for col in REQUIRED_COLUMNS if col not in df.columns]
     if missing_cols:
         return ValidationResponse(
@@ -24,55 +25,53 @@ def validate_csv(file_content: bytes) -> ValidationResponse:
             errors=[ValidationError(error_message=f"Missing required columns: {', '.join(missing_cols)}")]
         )
 
+    # Check for minimum row count
     if len(df) <= 10:
         return ValidationResponse(
             status="fail",
             errors=[ValidationError(row_index=None, id=None, column=None, error_message="File contains 10 or fewer data rows.")]
         )
 
-    for idx, row in df.iterrows():
-        row_index = int(idx) + 1
-        row_id = row.get("id")
-        
-        email_val = row.get("email")
-        if pd.isna(email_val) or str(email_val).strip() == "":
-            errors.append(ValidationError(
-                row_index=row_index,
-                id=row_id,
-                column="email",
-                error_message="Email column must not be empty or null."
-            ))
+    # --- Vectorized Validation ---
+    
+    # 1. Email validation (empty or null)
+    email_invalid_mask = df['email'].isna() | (df['email'].astype(str).str.strip() == "")
+    email_errors_df = df[email_invalid_mask]
+    for idx, row in email_errors_df.iterrows():
+        errors.append(ValidationError(
+            row_index=int(idx) + 1,
+            id=row.get("id"),
+            column="email",
+            error_message="Email column must not be empty or null."
+        ))
 
-        age_val = row.get("age")
+    # 2. Age validation
+    # Convert 'age' to numeric, invalid entries become NaN
+    numeric_age = pd.to_numeric(df['age'], errors='coerce')
+    
+    # 2a. Identify rows with invalid number format (wasn't NaN but became NaN)
+    format_errors_mask = numeric_age.isna()
+    format_errors_df = df[format_errors_mask]
+    for idx, row in format_errors_df.iterrows():
+        errors.append(ValidationError(
+            row_index=int(idx) + 1,
+            id=row.get("id"),
+            column="age",
+            error_message=f"Invalid number format: '{row.get('age')}'"
+        ))
         
-        is_valid_format = False
-        parsed_age = None
-        
-        if not pd.isna(age_val):
-            age_str = str(age_val).strip()
-            if re.fullmatch(r"\d+", age_str):
-                parsed_age = int(age_str)
-                is_valid_format = True
-            else:
-                is_valid_format = False
-        else:
-            is_valid_format = False
-
-        if not is_valid_format:
-            errors.append(ValidationError(
-                row_index=row_index,
-                id=row_id,
-                column="age",
-                error_message=f"Invalid number format: '{age_val}'"
-            ))
-        else:
-            if not (18 <= parsed_age <= 100):
-                errors.append(ValidationError(
-                    row_index=row_index,
-                    id=row_id,
-                    column="age",
-                    error_message=f"Age {parsed_age} is outside the allowed range of 18-100."
-                ))
+    # 2b. Range errors (only for valid numeric entries)
+    range_errors_mask = ~numeric_age.isna() & ((numeric_age < 18) | (numeric_age > 100))
+    range_errors_df = df[range_errors_mask]
+    for idx, row in range_errors_df.iterrows():
+        # Using .loc to get the numeric age for the current index
+        age_val = int(numeric_age.loc[idx])
+        errors.append(ValidationError(
+            row_index=int(idx) + 1,
+            id=row.get("id"),
+            column="age",
+            error_message=f"Age {age_val} is outside the allowed range of 18-100."
+        ))
 
     status = "pass" if not errors else "fail"
     return ValidationResponse(status=status, errors=errors)
